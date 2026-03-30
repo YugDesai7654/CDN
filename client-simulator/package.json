@@ -1,0 +1,19 @@
+{
+  "name": "client-simulator",
+  "version": "1.0.0",
+  "description": "Client Simulator — end-to-end test script demonstrating the full CDN system.",
+  "main": "dist/simulate.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/simulate.js",
+    "dev": "tsc && node dist/simulate.js"
+  },
+  "dependencies": {
+    "node-fetch": "^2.7.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.0",
+    "@types/node": "^20.0.0",
+    "@types/node-fetch": "^2.6.9"
+  }
+}
