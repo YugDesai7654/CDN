@@ -54,6 +54,11 @@ export default function DashboardPage() {
   const [purgeHistory, setPurgeHistory] = useState<PurgeResponse[]>([]);
   const [lastPurgeResult, setLastPurgeResult] = useState<PurgeResponse | null>(null);
 
+  // --------- State: Origin Files Explorer ---------
+  const [originFiles, setOriginFiles] = useState<{filename: string; size: number; lastModified: string}[] | null>(null);
+  const [loadingOriginFiles, setLoadingOriginFiles] = useState(false);
+  const [originFilesExpanded, setOriginFilesExpanded] = useState(false);
+
   // --------- Initial Load ---------
   useEffect(() => {
     refreshHealthAndStats();
@@ -83,6 +88,23 @@ export default function DashboardPage() {
     } catch (err) {
       // History fetch failure should not break the whole page
       console.error("Failed to load purge history", err);
+    }
+  }
+
+  async function handleFetchOriginFiles() {
+    if (originFilesExpanded && originFiles) {
+      setOriginFilesExpanded(false);
+      return;
+    }
+    setOriginFilesExpanded(true);
+    setLoadingOriginFiles(true);
+    try {
+      const res = await apiFetch<{files: {filename: string; size: number; lastModified: string}[]}>("/api/cdn/origin-files");
+      setOriginFiles(res.data.files);
+    } catch (err: any) {
+      toast.error(err.message || "Failed to fetch origin files");
+    } finally {
+      setLoadingOriginFiles(false);
     }
   }
 
@@ -398,6 +420,43 @@ export default function DashboardPage() {
                   </Button>
                 </form>
               </CardContent>
+            </Card>
+          </section>
+
+          {/* New Origin Files Section */}
+          <section className="space-y-4">
+            <h2 className="text-xl font-semibold tracking-tight">Origin Server Explorer</h2>
+            <Card className="overflow-hidden">
+              <div 
+                className="p-4 flex items-center justify-between cursor-pointer hover:bg-muted/30 transition-colors"
+                onClick={handleFetchOriginFiles}
+              >
+                <div className="flex items-center gap-3">
+                  <span className="font-semibold">Authoritative Files</span>
+                  {originFiles && <Badge variant="secondary">{originFiles.length} files</Badge>}
+                </div>
+                {loadingOriginFiles ? <Loader2 className="h-4 w-4 animate-spin" /> : (originFilesExpanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />)}
+              </div>
+              
+              {originFilesExpanded && (
+                <div className="p-4 pt-0 border-t border-border/50 bg-muted/10 max-h-[300px] overflow-y-auto custom-scrollbar">
+                  {originFiles && originFiles.length > 0 ? (
+                    <div className="space-y-2 mt-3">
+                      {originFiles.map((f) => (
+                         <div key={f.filename} className="flex justify-between items-center text-sm p-2 bg-background border border-border/50 rounded">
+                           <div className="flex flex-col">
+                             <span className="font-mono font-medium">{f.filename}</span>
+                             <span className="text-[10px] text-muted-foreground">{new Date(f.lastModified).toLocaleString()}</span>
+                           </div>
+                           <Badge variant="outline">{f.size}b</Badge>
+                         </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-muted-foreground text-sm italic mt-2">No files found on Origin.</div>
+                  )}
+                </div>
+              )}
             </Card>
           </section>
 

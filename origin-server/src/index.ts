@@ -80,6 +80,29 @@ app.use((req: Request, _res: Response, next: NextFunction): void => {
   next();
 });
 
+// ─── GET /files ─────────────────────────────────────────────────────────────
+// Returns a list of all files present in the Origin Server's data directory.
+app.get(
+  '/files',
+  (req: Request, res: Response, next: NextFunction): void => {
+    try {
+      const files = fs.readdirSync(DATA_DIR);
+      const fileList = files.map((filename) => {
+        const filePath = path.join(DATA_DIR, filename);
+        const stats = fs.statSync(filePath);
+        return {
+          filename,
+          size: stats.size,
+          lastModified: stats.mtime.toISOString(),
+        };
+      });
+      res.json({ files: fileList });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
 // ─── GET /files/:filename ───────────────────────────────────────────────────
 // Serves a file from the Origin's local data directory.
 //
