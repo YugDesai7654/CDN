@@ -1,0 +1,190 @@
+# ─── CDN Project — Docker Compose ────────────────────────────────────────────
+# Spins up all 6 services on a single Docker network (cdn-network).
+# Edge Nodes A/B/C share the same build context (./edge-node) but receive
+# different ENV VARS to simulate geographically distributed PoPs.
+#
+# Start:   docker-compose up --build
+# Stop:    docker-compose down
+# Logs:    docker-compose logs -f <service>
+# Rebuild: docker-compose up --build --force-recreate
+# ─────────────────────────────────────────────────────────────────────────────
+
+version: "3.9"
+
+services:
+  # ── Origin Server (Port 3000) ──────────────────────────────────────────────
+  # The single source of truth.  All Edge Nodes fetch content from here on
+  # cache misses.  The /data/ volume persists files across container restarts.
+  origin-server:
+    build: ./origin-server
+    container_name: origin-server
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: "3000"
+      PURGE_SERVICE_URL: "http://purge-service:4000"
+    volumes:
+      - ./origin-server/data:/app/data
+    networks:
+      - cdn-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ── Edge Node A — Americas (Port 3001) ─────────────────────────────────────
+  edge-node-a:
+    build: ./edge-node
+    container_name: edge-node-a
+    ports:
+      - "3001:3001"
+    environment:
+      PORT: "3001"
+      NODE_ID: "A"
+      REGION: "americas"
+      ORIGIN_URL: "http://origin-server:3000"
+      MAX_CONNECTIONS: "10"
+    networks:
+      - cdn-network
+    depends_on:
+      origin-server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ── Edge Node B — Europe (Port 3002) ───────────────────────────────────────
+  edge-node-b:
+    build: ./edge-node
+    container_name: edge-node-b
+    ports:
+      - "3002:3002"
+    environment:
+      PORT: "3002"
+      NODE_ID: "B"
+      REGION: "europe"
+      ORIGIN_URL: "http://origin-server:3000"
+      MAX_CONNECTIONS: "10"
+    networks:
+      - cdn-network
+    depends_on:
+      origin-server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3002/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ── Edge Node C — Asia (Port 3003) ─────────────────────────────────────────
+  edge-node-c:
+    build: ./edge-node
+    container_name: edge-node-c
+    ports:
+      - "3003:3003"
+    environment:
+      PORT: "3003"
+      NODE_ID: "C"
+      REGION: "asia"
+      ORIGIN_URL: "http://origin-server:3000"
+      MAX_CONNECTIONS: "10"
+    networks:
+      - cdn-network
+    depends_on:
+      origin-server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3003/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ── Traffic Manager / GSLB (Port 4001) ─────────────────────────────────────
+  # Depends on all 3 edge nodes being healthy before accepting traffic,
+  # so the initial health poll finds live nodes.
+  traffic-manager:
+    build: ./traffic-manager
+    container_name: traffic-manager
+    ports:
+      - "4001:4001"
+    environment:
+      PORT: "4001"
+      EDGE_A_URL: "http://edge-node-a:3001"
+      EDGE_B_URL: "http://edge-node-b:3002"
+      EDGE_C_URL: "http://edge-node-c:3003"
+    networks:
+      - cdn-network
+    depends_on:
+      edge-node-a:
+        condition: service_healthy
+      edge-node-b:
+        condition: service_healthy
+      edge-node-c:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:4001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ── Purge Service (Port 4000) ──────────────────────────────────────────────
+  # Depends on all 3 edge nodes so it can fan-out DELETE requests.
+  purge-service:
+    build: ./purge-service
+    container_name: purge-service
+    ports:
+      - "4000:4000"
+    environment:
+      PORT: "4000"
+      EDGE_A_URL: "http://edge-node-a:3001"
+      EDGE_B_URL: "http://edge-node-b:3002"
+      EDGE_C_URL: "http://edge-node-c:3003"
+    networks:
+      - cdn-network
+    depends_on:
+      edge-node-a:
+        condition: service_healthy
+      edge-node-b:
+        condition: service_healthy
+      edge-node-c:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:4000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  cdn-frontend:
+    build:
+      context: ./cdn-frontend
+      dockerfile: Dockerfile
+    container_name: cdn-frontend
+    ports:
+      - "3004:3004"
+    environment:
+      - ORIGIN_URL=http://origin-server:3000
+      - EDGE_A_URL=http://edge-node-a:3001
+      - EDGE_B_URL=http://edge-node-b:3002
+      - EDGE_C_URL=http://edge-node-c:3003
+      - PURGE_SERVICE_URL=http://purge-service:4000
+      - TRAFFIC_MANAGER_URL=http://traffic-manager:4001
+      - AUTH_COOKIE_SECRET=local-dev-secret
+      - PORT=3004
+    depends_on:
+      - traffic-manager
+      - purge-service
+    networks:
+      - cdn-network
+
+networks:
+  cdn-network:
+    driver: bridge
