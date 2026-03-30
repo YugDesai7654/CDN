@@ -1,0 +1,4 @@
+About the CDN Project
+This is a simplified Content Delivery Network built for a
+Distributed Computing lab.  It demonstrates caching, cache
+invalidation, traffic routing, and load shedding.

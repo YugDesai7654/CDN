@@ -1,0 +1,3 @@
+Hello from the UPDATED Origin Server!
+This content was changed by the client simulator.
+Edge caches should have been purged.

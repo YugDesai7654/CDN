@@ -1,0 +1,4 @@
+CDN News — Latest Updates
+Edge Node C has been deployed in the Asia region.
+Traffic Manager now supports location-aware routing.
+Purge Service fan-out latency is under 50 ms.
