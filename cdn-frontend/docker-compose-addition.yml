@@ -1,0 +1,24 @@
+# This is a snippet. To add the frontend to your local docker environment, 
+# append this block under 'services:' in your root docker-compose.yml file.
+
+  cdn-frontend:
+    build:
+      context: ./cdn-frontend
+      dockerfile: Dockerfile
+    container_name: cdn-frontend
+    ports:
+      - "3004:3004"
+    environment:
+      - ORIGIN_URL=http://origin-server:3000
+      - EDGE_A_URL=http://edge-node-a:3001
+      - EDGE_B_URL=http://edge-node-b:3002
+      - EDGE_C_URL=http://edge-node-c:3003
+      - PURGE_SERVICE_URL=http://purge-service:4000
+      - TRAFFIC_MANAGER_URL=http://traffic-manager:4001
+      - AUTH_COOKIE_SECRET=local-dev-secret
+      - PORT=3004
+    depends_on:
+      - traffic-manager
+      - purge-service
+    networks:
+      - cdn-network
