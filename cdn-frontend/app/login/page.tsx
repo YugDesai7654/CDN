@@ -9,21 +9,20 @@ import { ServerIcon, Loader2 } from "lucide-react";
 
 export default function LoginPage() {
   const router = useRouter();
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [loggingAs, setLoggingAs] = useState<"admin" | "user" | null>(null);
 
-  async function handleLogin(e: React.FormEvent) {
-    e.preventDefault();
+  async function handleLogin(usr: string, pass: string, type: "admin" | "user") {
     setError("");
     setLoading(true);
+    setLoggingAs(type);
 
     try {
       const res = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify({ username: usr, password: pass }),
       });
 
       const data = await res.json();
@@ -40,8 +39,8 @@ export default function LoginPage() {
       } else {
         setError("An unknown error occurred");
       }
-    } finally {
       setLoading(false);
+      setLoggingAs(null);
     }
   }
 
@@ -57,45 +56,37 @@ export default function LoginPage() {
           <CardTitle className="text-2xl font-bold">CDN Control Center</CardTitle>
           <CardDescription>Distributed Edge Cache System</CardDescription>
         </CardHeader>
-        <CardContent>
-          <form onSubmit={handleLogin} className="space-y-4">
-            <div className="space-y-2">
-              <Input
-                type="text"
-                placeholder="Username"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                required
-                disabled={loading}
-              />
-            </div>
-            <div className="space-y-2">
-              <Input
-                type="password"
-                placeholder="Password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-                disabled={loading}
-              />
-            </div>
-            {error && <div className="text-sm font-medium text-destructive text-center">{error}</div>}
-            <Button type="submit" className="w-full" disabled={loading}>
-              {loading ? (
-                <>
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  Authenticating...
-                </>
-              ) : (
-                "Login to Mission Control"
-              )}
+        <CardContent className="space-y-4">
+          {error && <div className="text-sm font-medium text-destructive text-center mb-2">{error}</div>}
+          
+          <div className="flex flex-col gap-3">
+            <Button 
+              onClick={() => handleLogin("admin", "admin123", "admin")} 
+              disabled={loading}
+              className="w-full h-12"
+            >
+              {loading && loggingAs === "admin" ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : null}
+              Log in as Admin (Operator)
             </Button>
-            <div className="text-xs text-center text-muted-foreground mt-4 leading-relaxed">
-              Demo: <span className="font-mono bg-muted px-1.5 py-0.5 rounded">admin/admin123</span> (operator)
-              <br />
-              Demo: <span className="font-mono bg-muted px-1.5 py-0.5 rounded">user/user123</span> (viewer)
-            </div>
-          </form>
+            
+            <Button 
+              onClick={() => handleLogin("user", "user123", "user")} 
+              disabled={loading}
+              variant="secondary"
+              className="w-full h-12"
+            >
+              {loading && loggingAs === "user" ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : null}
+              Log in as User (Viewer)
+            </Button>
+          </div>
+          
+          <div className="text-xs text-center text-muted-foreground mt-4 leading-relaxed">
+            Quick links to access the simulator interfaces.
+          </div>
         </CardContent>
       </Card>
     </div>
