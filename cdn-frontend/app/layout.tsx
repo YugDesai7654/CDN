@@ -1,9 +1,6 @@
 import type { Metadata } from "next";
-import { Inter } from "next/font/google";
 import "./globals.css";
 import { cn } from "@/lib/utils";
-
-const inter = Inter({ subsets: ["latin"], variable: "--font-sans" });
 
 export const metadata: Metadata = {
   title: "CDN Control Center",
@@ -17,7 +14,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className="dark">
-      <body className={cn("min-h-screen bg-zinc-950 font-sans antialiased", inter.variable)}>
+      <body className={cn("min-h-screen bg-zinc-950 font-sans antialiased")}>
         {children}
       </body>
     </html>

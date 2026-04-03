@@ -3,12 +3,11 @@
 import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { toast } from "sonner";
-import { RefreshCw, UploadCloud, Trash2, Search, Info, CheckCircle2, ChevronDown, ChevronUp, Loader2 } from "lucide-react";
+import { RefreshCw, Trash2, Search, Info, CheckCircle2, ChevronDown, ChevronUp, Loader2 } from "lucide-react";
 
 import { apiFetch } from "@/lib/utils";
 import { 
@@ -26,6 +25,7 @@ import { PurgeHistory } from "@/components/purge-history";
 import { FileViewer } from "@/components/file-viewer";
 import { CacheBadge } from "@/components/cache-badge";
 import { LatencyBadge } from "@/components/latency-badge";
+import { FileUploadPanel } from "@/components/file-upload-panel";
 
 export default function DashboardPage() {
   // --------- State: Section A (Health) & C (Stats) ---------
@@ -41,11 +41,6 @@ export default function DashboardPage() {
   const [routeInfo, setRouteInfo] = useState<RouteResponse | null>(null);
   const [fileData, setFileData] = useState<CDNFileResponse | null>(null);
   const [fetchError, setFetchError] = useState("");
-
-  // --------- State: Section D (Upload Origin) ---------
-  const [uploadFilename, setUploadFilename] = useState("");
-  const [uploadContent, setUploadContent] = useState("");
-  const [uploading, setUploading] = useState(false);
 
   // --------- State: Section E (Purge) & F (History) ---------
   const [purgeFilename, setPurgeFilename] = useState("");
@@ -74,8 +69,9 @@ export default function DashboardPage() {
       ]);
       setHealthData(hRes.data);
       setStatsData(sRes.data);
-    } catch (err: any) {
-      toast.error("Failed to load edge health: " + (err.message || "Unknown error"));
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      toast.error("Failed to load edge health: " + message);
     } finally {
       setLoadingHealth(false);
     }
@@ -101,8 +97,9 @@ export default function DashboardPage() {
     try {
       const res = await apiFetch<{files: {filename: string; size: number; lastModified: string}[]}>("/api/cdn/origin-files");
       setOriginFiles(res.data.files);
-    } catch (err: any) {
-      toast.error(err.message || "Failed to fetch origin files");
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Failed to fetch origin files";
+      toast.error(message);
     } finally {
       setLoadingOriginFiles(false);
     }
@@ -133,34 +130,19 @@ export default function DashboardPage() {
         `/api/cdn/file?filename=${encodeURIComponent(fetchFilename)}&edgeUrl=${encodeURIComponent(url)}`
       );
       setFileData(fileRes.data);
-    } catch (err: any) {
-      setFetchError(err.message || "An error occurred while fetching the file.");
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "An error occurred while fetching the file.";
+      setFetchError(message);
     } finally {
       setFetchingFile(false);
     }
   }
 
-  async function handleUpload(e: React.FormEvent) {
-    e.preventDefault();
-    if (!uploadFilename || !uploadContent) return;
-
-    setUploading(true);
-    try {
-      await apiFetch("/api/cdn/upload", {
-        method: "POST",
-        body: JSON.stringify({ filename: uploadFilename, content: uploadContent }),
-      });
-      toast.success("File uploaded. Cache purge triggered automatically.");
-      setUploadFilename("");
-      setUploadContent("");
-      // Refresh history slightly later as purge is async on backend
-      setTimeout(refreshPurgeHistory, 1500);
-      setTimeout(refreshHealthAndStats, 2000);
-    } catch (err: any) {
-      toast.error(err.message || "Failed to upload file");
-    } finally {
-      setUploading(false);
-    }
+  // ─── Upload success callback ──────────────────────────────────────────────
+  function handleUploadSuccess() {
+    // Refresh history slightly later as purge is async on backend
+    setTimeout(refreshPurgeHistory, 1500);
+    setTimeout(refreshHealthAndStats, 2000);
   }
 
   async function handlePurge(targetFile: string) {
@@ -182,8 +164,9 @@ export default function DashboardPage() {
       }
       refreshPurgeHistory();
       refreshHealthAndStats();
-    } catch (err: any) {
-      toast.error(err.message || "Failed to purge cache");
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Failed to purge cache";
+      toast.error(message);
     } finally {
       if (isAll) setPurgingAll(false);
       else setPurgingSingle(false);
@@ -202,14 +185,12 @@ export default function DashboardPage() {
     let status = "down";
     let region = REGION_INFO[nodeId === "A" ? "americas" : nodeId === "B" ? "europe" : "asia"]?.label || "unknown";
     let busy = false;
-    let checkedAt = new Date().toISOString();
 
     const tmEdge = healthData?.edges.find(e => e.nodeId === nodeId);
     if (tmEdge) {
       status = tmEdge.healthy ? "up" : "down";
       region = tmEdge.region;
       busy = tmEdge.busy;
-      checkedAt = tmEdge.lastChecked;
     }
 
     const nodeStats = statsData.find(s => s.nodeId === nodeId);
@@ -363,10 +344,24 @@ export default function DashboardPage() {
                   {expandedNodes[stat.nodeId] && (
                     <div className="p-4 pt-0 border-t border-border/50 bg-muted/10">
                       {stat.entries && stat.entries.length > 0 ? (
-                        <ul className="space-y-1 mt-2 font-mono text-sm">
-                          {stat.entries.map((filename) => (
-                            <li key={filename} className="text-muted-foreground flex items-center before:content-[''] before:w-1.5 before:h-1.5 before:bg-emerald-500/50 before:rounded-full before:mr-2">
-                              {filename}
+                        <ul className="space-y-2 mt-2">
+                          {stat.entries.map((entry) => (
+                            <li key={typeof entry === "string" ? entry : entry.filename} className="flex items-center justify-between text-sm p-2 bg-background border border-border/50 rounded">
+                              <div className="flex items-center gap-2">
+                                <span className="w-1.5 h-1.5 bg-emerald-500/50 rounded-full shrink-0" />
+                                <span className="font-mono">{typeof entry === "string" ? entry : entry.filename}</span>
+                                {typeof entry !== "string" && (
+                                  <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+                                    {entry.mediaType?.toUpperCase() || "TEXT"}
+                                  </Badge>
+                                )}
+                              </div>
+                              {typeof entry !== "string" && (
+                                <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                                  <span>{entry.hits} hits</span>
+                                  <span>{entry.size > 1024 ? `${(entry.size / 1024).toFixed(1)}KB` : `${entry.size}B`}</span>
+                                </div>
+                              )}
                             </li>
                           ))}
                         </ul>
@@ -392,33 +387,7 @@ export default function DashboardPage() {
                 <CardDescription>Upload content to the Origin Server. Triggers automatic cache invalidation.</CardDescription>
               </CardHeader>
               <CardContent>
-                <form onSubmit={handleUpload} className="space-y-4">
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium">Filename</label>
-                    <Input
-                      type="text"
-                      placeholder="e.g. banner.json"
-                      value={uploadFilename}
-                      onChange={(e) => setUploadFilename(e.target.value)}
-                      required
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium">Content Payload</label>
-                    <Textarea
-                      placeholder="Enter raw text, JSON, or markdown..."
-                      rows={5}
-                      value={uploadContent}
-                      onChange={(e) => setUploadContent(e.target.value)}
-                      required
-                      className="font-mono text-sm custom-scrollbar"
-                    />
-                  </div>
-                  <Button type="submit" className="w-full" disabled={uploading || !uploadFilename || !uploadContent}>
-                    {uploading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <UploadCloud className="mr-2 h-4 w-4" />}
-                    Upload & Publish
-                  </Button>
-                </form>
+                <FileUploadPanel onUploadSuccess={handleUploadSuccess} />
               </CardContent>
             </Card>
           </section>
@@ -510,7 +479,7 @@ export default function DashboardPage() {
             {/* Last Purge Result Overlay */}
             {lastPurgeResult && (
               <div className="mt-4 border border-border/50 rounded-lg p-3 bg-muted/20 animate-in slide-in-from-top-2">
-                <span className="text-sm font-semibold mb-2 block">Purge Executed: <span className="font-mono font-normal">"{lastPurgeResult.filename}"</span></span>
+                <span className="text-sm font-semibold mb-2 block">Purge Executed: <span className="font-mono font-normal">&quot;{lastPurgeResult.filename}&quot;</span></span>
                 <div className="grid grid-cols-3 gap-2">
                   {lastPurgeResult.results.map(r => (
                     <div key={r.nodeId} className="flex flex-col items-center bg-background border border-border/50 p-2 rounded">

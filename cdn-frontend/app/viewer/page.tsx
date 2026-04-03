@@ -1,53 +1,137 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { REGION_INFO } from "@/lib/constants";
 import { apiFetch } from "@/lib/utils";
-import { RouteResponse, CDNFileResponse } from "@/lib/types";
+import { RouteResponse } from "@/lib/types";
 import { CacheBadge } from "@/components/cache-badge";
 import { LatencyBadge } from "@/components/latency-badge";
-import { FileViewer } from "@/components/file-viewer";
+import { FileBrowser } from "@/components/file-browser";
+import { SmartMediaRenderer } from "@/components/smart-media-renderer";
 import { Loader2, Search, Info, CheckCircle2 } from "lucide-react";
+
+// ─── CDN Response Metadata ──────────────────────────────────────────────────
+// Extracted from response headers after fetching binary from /api/cdn/file
+interface CDNMetadata {
+  xCache: "HIT" | "MISS";
+  servedBy: string;
+  region: string;
+  cacheAge: string;
+  latencyMs: number;
+}
 
 export default function ViewerPage() {
   const [location, setLocation] = useState("americas");
   const [filename, setFilename] = useState("");
   const [loading, setLoading] = useState(false);
-  
+
   const [routeInfo, setRouteInfo] = useState<RouteResponse | null>(null);
-  const [fileData, setFileData] = useState<CDNFileResponse | null>(null);
+  const [cdnMeta, setCdnMeta] = useState<CDNMetadata | null>(null);
   const [error, setError] = useState("");
 
-  async function handleFetch(e: React.FormEvent) {
-    e.preventDefault();
-    if (!filename) return;
+  // Binary content state
+  const [blobUrl, setBlobUrl] = useState<string | null>(null);
+  const [contentType, setContentType] = useState<string>("text/plain");
+  const [fileSize, setFileSize] = useState<number>(0);
+  const [displayFilename, setDisplayFilename] = useState<string>("");
+
+  // Track previous blob URL for cleanup
+  const prevBlobUrlRef = useRef<string | null>(null);
+
+  // Clean up blob URL on unmount
+  useEffect(() => {
+    return () => {
+      if (prevBlobUrlRef.current) {
+        URL.revokeObjectURL(prevBlobUrlRef.current);
+      }
+    };
+  }, []);
+
+  // ─── Fetch File Through CDN Pipeline ──────────────────────────────────────
+  const handleFetch = useCallback(async (e?: React.FormEvent, overrideFilename?: string) => {
+    if (e) e.preventDefault();
+    const target = overrideFilename || filename;
+    if (!target) return;
 
     setLoading(true);
     setError("");
     setRouteInfo(null);
-    setFileData(null);
+    setCdnMeta(null);
+
+    // Revoke previous blob URL
+    if (prevBlobUrlRef.current) {
+      URL.revokeObjectURL(prevBlobUrlRef.current);
+      prevBlobUrlRef.current = null;
+    }
+    setBlobUrl(null);
 
     try {
-      // 1. Call Traffic Manager /route
+      // 1. Call Traffic Manager /route to get the best edge URL
       const routeRes = await apiFetch<RouteResponse>("/api/cdn/route", {
         headers: { "X-Client-Location": location },
       });
       const edgeUrl = routeRes.data.edgeUrl;
       setRouteInfo(routeRes.data);
 
-      // 2. Fetch the file from the selected edge URL
-      const fileRes = await apiFetch<CDNFileResponse>(
-        `/api/cdn/file?filename=${encodeURIComponent(filename)}&edgeUrl=${encodeURIComponent(edgeUrl)}`
+      // 2. Fetch the file as binary from the edge (via Next.js proxy)
+      const fileRes = await fetch(
+        `/api/cdn/file?filename=${encodeURIComponent(target)}&edgeUrl=${encodeURIComponent(edgeUrl)}`,
+        { cache: "no-store" }
       );
-      setFileData(fileRes.data);
-    } catch (err: any) {
-      setError(err.message || "An error occurred while fetching the file.");
+
+      if (!fileRes.ok) {
+        const errText = await fileRes.text();
+        let errMsg = `Edge returned ${fileRes.status} for ${target}`;
+        try {
+          const errJson = JSON.parse(errText);
+          errMsg = errJson.error || errMsg;
+        } catch {
+          // use default message
+        }
+        throw new Error(errMsg);
+      }
+
+      // 3. Read binary as blob and create object URL
+      const blob = await fileRes.blob();
+      const url = URL.createObjectURL(blob);
+      prevBlobUrlRef.current = url;
+      setBlobUrl(url);
+
+      // 4. Extract CDN metadata from response headers
+      const resContentType = fileRes.headers.get("content-type") || "application/octet-stream";
+      const xCache = (fileRes.headers.get("x-cache") || "MISS") as "HIT" | "MISS";
+      const xServedBy = fileRes.headers.get("x-served-by") || "unknown";
+      const xRegion = fileRes.headers.get("x-region") || "unknown";
+      const xCacheAge = fileRes.headers.get("x-cache-age") || "0";
+      const xLatencyMs = parseInt(fileRes.headers.get("x-latency-ms") || "0", 10);
+
+      setContentType(resContentType);
+      setFileSize(blob.size);
+      setDisplayFilename(target);
+
+      setCdnMeta({
+        xCache,
+        servedBy: xServedBy,
+        region: xRegion,
+        cacheAge: xCacheAge,
+        latencyMs: xLatencyMs,
+      });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "An error occurred while fetching the file.";
+      setError(message);
     } finally {
       setLoading(false);
     }
+  }, [filename, location]);
+
+  // ─── File Browser Selection Handler ───────────────────────────────────────
+  function handleFileSelect(selectedFilename: string) {
+    setFilename(selectedFilename);
+    // Trigger fetch immediately
+    handleFetch(undefined, selectedFilename);
   }
 
   return (
@@ -71,6 +155,9 @@ export default function ViewerPage() {
         </div>
       </div>
 
+      {/* FILE BROWSER — Grid of all files on Origin */}
+      <FileBrowser onFileSelect={handleFileSelect} />
+
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-1 space-y-6">
           <Card>
@@ -79,7 +166,7 @@ export default function ViewerPage() {
               <CardDescription>Fetch a file from the CDN</CardDescription>
             </CardHeader>
             <CardContent>
-              <form onSubmit={handleFetch} className="space-y-4">
+              <form onSubmit={(e) => handleFetch(e)} className="space-y-4">
                 <div className="space-y-2">
                   <Input
                     type="text"
@@ -102,26 +189,41 @@ export default function ViewerPage() {
             </CardContent>
           </Card>
 
-          {routeInfo && fileData && (
+          {/* CDN Internals Panel */}
+          {routeInfo && cdnMeta && (
             <Card className="overflow-hidden border-border/80 shadow-md">
               <CardHeader className="pb-3 bg-muted/20 border-b border-border/50">
                 <CardTitle className="text-lg flex items-center justify-between">
                   CDN Internals
-                  <CacheBadge status={fileData.xCache} />
+                  <CacheBadge status={cdnMeta.xCache} />
                 </CardTitle>
               </CardHeader>
               <CardContent className="pt-4 space-y-4">
                 <div className="space-y-1 text-sm">
                   <div className="text-muted-foreground">Served By Node</div>
                   <div className="font-medium flex items-center gap-1.5">
-                    {fileData.servedBy} — {REGION_INFO[routeInfo.region]?.label || routeInfo.region}
+                    {cdnMeta.servedBy} — {REGION_INFO[routeInfo.region]?.label || routeInfo.region}
                     <span className="text-lg leading-none">{REGION_INFO[routeInfo.region]?.emoji}</span>
                   </div>
                 </div>
 
                 <div className="space-y-1 text-sm">
                   <div className="text-muted-foreground">Round-Trip Latency</div>
-                  <div className="font-medium mt-1"><LatencyBadge ms={fileData.latencyMs} /></div>
+                  <div className="font-medium mt-1"><LatencyBadge ms={cdnMeta.latencyMs} /></div>
+                </div>
+
+                {cdnMeta.xCache === "HIT" && (
+                  <div className="space-y-1 text-sm">
+                    <div className="text-muted-foreground">Cache Age</div>
+                    <div className="font-medium">{cdnMeta.cacheAge}s</div>
+                  </div>
+                )}
+
+                <div className="space-y-1 text-sm">
+                  <div className="text-muted-foreground">Content-Type</div>
+                  <div className="font-mono text-xs p-1.5 bg-muted rounded border border-border/50">
+                    {contentType}
+                  </div>
                 </div>
 
                 <div className="space-y-1 text-sm">
@@ -137,7 +239,7 @@ export default function ViewerPage() {
                 </div>
 
                 <div className="pt-3 mt-1 border-t border-border/50 text-sm">
-                  {fileData.xCache === "MISS" ? (
+                  {cdnMeta.xCache === "MISS" ? (
                     <div className="flex gap-2 text-amber-500 bg-amber-500/10 p-2.5 rounded text-xs leading-relaxed">
                       <Info className="w-4 h-4 shrink-0 mt-0.5" />
                       <span>First request — file pulled from Origin (2s delay is normal). Now cached.</span>
@@ -154,15 +256,15 @@ export default function ViewerPage() {
           )}
         </div>
 
+        {/* SMART MEDIA RENDERER — replaces old text-only FileViewer */}
         <div className="lg:col-span-2">
-          {(!routeInfo || !fileData) && (
-            <div className="h-full min-h-[400px]">
-              <FileViewer file={null} />
-            </div>
-          )}
-          {routeInfo && fileData && (
-            <FileViewer file={fileData} />
-          )}
+          <SmartMediaRenderer
+            blobUrl={blobUrl}
+            contentType={contentType}
+            filename={displayFilename}
+            fileSize={fileSize}
+            isLoading={loading}
+          />
         </div>
       </div>
     </div>
