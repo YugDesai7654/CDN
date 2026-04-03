@@ -4,11 +4,23 @@
 // requests never need to travel back to the Origin Server.  Three instances
 // of this same codebase run simultaneously (Edge-A, Edge-B, Edge-C), each
 // differentiated only by environment variables (NODE_ID, REGION, PORT).
+//
+// Phase 2 additions:
+//   • Binary-aware caching — content stored as Buffer, not string
+//   • Streams raw bytes with correct Content-Type headers
+//   • Cache stats include mediaType breakdown
 // ─────────────────────────────────────────────────────────────────────────────
 
 import express, { Request, Response, NextFunction } from 'express';
 import fetch from 'node-fetch';
-import { CacheEntry, CacheStats, EdgeHealth, OriginFileResponse } from './types';
+import path from 'path';
+import {
+  CacheEntry,
+  CacheEntryInfo,
+  CacheStats,
+  EdgeHealth,
+  FileContentType,
+} from './types';
 
 // ─── ENV VAR Validation ─────────────────────────────────────────────────────
 const PORT: number = parseInt(process.env.PORT || '', 10);
@@ -38,6 +50,39 @@ if (!MAX_CONNECTIONS || isNaN(MAX_CONNECTIONS)) {
   process.exit(1);
 }
 
+// ─── MIME / Media-Type Helpers ──────────────────────────────────────────────
+// Duplicated from Origin Server so both components agree on content types
+// without needing a shared package.
+
+/** Map a file extension to a MIME Content-Type string. */
+function getContentType(filename: string): string {
+  const ext = path.extname(filename).toLowerCase();
+  const map: Record<string, string> = {
+    '.txt':  'text/plain',
+    '.jpg':  'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png':  'image/png',
+    '.gif':  'image/gif',
+    '.webp': 'image/webp',
+    '.mp3':  'audio/mpeg',
+    '.wav':  'audio/wav',
+    '.ogg':  'audio/ogg',
+    '.m4a':  'audio/mp4',
+    '.mp4':  'video/mp4',
+    '.webm': 'video/webm',
+  };
+  return map[ext] || 'application/octet-stream';
+}
+
+/** Map a MIME Content-Type to a broad media category for the frontend. */
+function getMediaType(contentType: string): FileContentType {
+  if (contentType.startsWith('text/'))  return 'text';
+  if (contentType.startsWith('image/')) return 'image';
+  if (contentType.startsWith('audio/')) return 'audio';
+  if (contentType.startsWith('video/')) return 'video';
+  return 'text'; // default fallback
+}
+
 // ─── In-Memory Cache ────────────────────────────────────────────────────────
 // CDN CONCEPT — Edge Cache:
 // Each Edge Node maintains its own independent cache.  In Phase 1 we use a
@@ -45,6 +90,9 @@ if (!MAX_CONNECTIONS || isNaN(MAX_CONNECTIONS)) {
 // be backed by a shared store like Redis or Varnish with TTL-based eviction.
 // The cache is intentionally NOT shared between Edge instances — each PoP
 // caches independently, which is how real CDNs work (Akamai, CloudFront).
+//
+// Phase 2: CacheEntry.data is now a Buffer, not a string, so we can cache
+// binary files (images, audio, video) alongside text.
 const cache: Map<string, CacheEntry> = new Map();
 
 // ─── Active Connection Counter ──────────────────────────────────────────────
@@ -79,6 +127,10 @@ app.use((_req: Request, res: Response, next: NextFunction): void => {
 // ─── GET /files/:filename ───────────────────────────────────────────────────
 // The primary endpoint.  Clients (or the Traffic Manager) request a file;
 // the Edge Node either serves it from cache or fetches it from the Origin.
+//
+// Phase 2: responses are now raw binary with correct Content-Type headers
+// instead of JSON-wrapped content.  This is required for images, audio,
+// and video to render correctly in the browser.
 app.get(
   '/files/:filename',
   async (req: Request, res: Response, next: NextFunction): Promise<void> => {
@@ -107,18 +159,20 @@ app.get(
         await new Promise<void>((resolve) => setTimeout(resolve, 100));
 
         console.log(
-          `[CACHE HIT] Node-${NODE_ID} served "${filename}" from cache (hits: ${cached.hits})`,
+          `[CACHE HIT] Node-${NODE_ID} served "${filename}" from cache ` +
+          `(hits: ${cached.hits}, type: ${cached.contentType})`,
         );
 
+        // Set response headers
+        res.setHeader('Content-Type', cached.contentType);
+        res.setHeader('Content-Length', cached.size);
         res.setHeader('X-Cache', 'HIT');
         res.setHeader('X-Cache-Age', String(ageSeconds));
-        res.json({
-          filename: cached.filename,
-          content: cached.content,
-          contentType: cached.contentType,
-          source: `edge-${NODE_ID}`,
-          cacheHit: true,
-        });
+        res.setHeader('X-Served-By', NODE_ID);
+        res.setHeader('X-Region', REGION);
+
+        // Send raw binary buffer — not res.json(), not res.send() with string
+        res.end(cached.data);
         return;
       }
 
@@ -127,6 +181,9 @@ app.get(
       // Origin Server, which has a 2 000 ms artificial delay to simulate
       // backbone latency.  Once fetched, we store the result in our local
       // cache so that all future requests for this file are fast cache hits.
+      //
+      // Phase 2: The Origin now streams raw binary.  We read the response
+      // as an ArrayBuffer and extract metadata from response headers.
       console.log(
         `[CACHE MISS] Node-${NODE_ID} fetching "${filename}" from Origin`,
       );
@@ -134,33 +191,50 @@ app.get(
       const originRes = await fetch(`${ORIGIN_URL}/files/${filename}`);
 
       if (!originRes.ok) {
+        const errorBody = await originRes.text();
         res.status(originRes.status).json({
           error: `Origin returned ${originRes.status} for ${filename}`,
+          details: errorBody,
         });
         return;
       }
 
-      const data: OriginFileResponse =
-        (await originRes.json()) as OriginFileResponse;
+      // Read the full response as a Buffer
+      const buffer = Buffer.from(await originRes.arrayBuffer());
 
-      // Store in local cache
+      // Extract metadata from Origin's response headers
+      const contentType =
+        originRes.headers.get('content-type') || getContentType(filename);
+      const originFilename =
+        originRes.headers.get('x-filename') || filename;
+      const mediaType = getMediaType(contentType);
+
+      // Store in local cache as Buffer
       const entry: CacheEntry = {
-        filename: data.filename,
-        content: data.content,
-        contentType: data.contentType,
+        filename: originFilename,
+        contentType,
+        mediaType,
+        data: buffer,
         cachedAt: new Date(),
         hits: 0,
+        size: buffer.length,
       };
       cache.set(filename, entry);
 
+      console.log(
+        `[CACHED] Node-${NODE_ID} cached "${filename}" ` +
+        `(${contentType}, ${buffer.length} bytes)`,
+      );
+
+      // Set response headers
+      res.setHeader('Content-Type', contentType);
+      res.setHeader('Content-Length', buffer.length);
       res.setHeader('X-Cache', 'MISS');
-      res.json({
-        filename: data.filename,
-        content: data.content,
-        contentType: data.contentType,
-        source: `edge-${NODE_ID}`,
-        cacheHit: false,
-      });
+      res.setHeader('X-Served-By', NODE_ID);
+      res.setHeader('X-Region', REGION);
+
+      // Stream raw binary back to client
+      res.end(buffer);
     } catch (err) {
       next(err);
     }
@@ -202,14 +276,28 @@ app.delete(
 // ─── GET /cache/stats ───────────────────────────────────────────────────────
 // Returns what this node currently has cached — useful for debugging and
 // for operators to understand cache distribution across the CDN.
+//
+// Phase 2: entries now include contentType, mediaType, size, hits, cachedAt
+// instead of just filenames, enabling richer frontend dashboards.
 app.get(
   '/cache/stats',
   (_req: Request, res: Response): void => {
+    const entries: CacheEntryInfo[] = Array.from(cache.values()).map(
+      (entry) => ({
+        filename: entry.filename,
+        contentType: entry.contentType,
+        mediaType: entry.mediaType,
+        size: entry.size,
+        hits: entry.hits,
+        cachedAt: entry.cachedAt.toISOString(),
+      }),
+    );
+
     const stats: CacheStats = {
       nodeId: NODE_ID,
       region: REGION,
       totalCached: cache.size,
-      entries: Array.from(cache.keys()),
+      entries,
       activeConnections,
     };
 
@@ -246,7 +334,7 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction): void =>
 // ─── Start Server ───────────────────────────────────────────────────────────
 app.listen(PORT, (): void => {
   console.log('═══════════════════════════════════════════════════');
-  console.log(`  Edge Node — ${NODE_ID}`);
+  console.log(`  Edge Node — ${NODE_ID} (Phase 2 — Multimodal)`);
   console.log('═══════════════════════════════════════════════════');
   console.log(`  PORT            : ${PORT}`);
   console.log(`  NODE_ID         : ${NODE_ID}`);
@@ -256,7 +344,4 @@ app.listen(PORT, (): void => {
   console.log('═══════════════════════════════════════════════════');
   console.log(`  ✓ Ready — listening on port ${PORT}`);
   console.log('═══════════════════════════════════════════════════');
-
-  // TODO Phase 2: replace Map with Redis client for TTL-aware persistent cache
-  // TODO Phase 2: stream binary responses from Origin using pipe()
 });

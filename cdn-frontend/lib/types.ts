@@ -2,6 +2,9 @@
 // All TypeScript interfaces used across the frontend.
 // Import from "@/lib/types" everywhere — never define ad-hoc types elsewhere.
 
+// ─── Media Type Categories ──────────────────────────────────────────────────
+export type FileContentType = "text" | "image" | "audio" | "video";
+
 /** Response from an Edge Node file fetch, enriched with CDN metadata */
 export interface CDNFileResponse {
   filename: string;
@@ -16,12 +19,22 @@ export interface CDNFileResponse {
   region: string;
 }
 
+/** Metadata for a single cached entry on an Edge Node */
+export interface CacheEntryInfo {
+  filename: string;
+  contentType: string;
+  mediaType: FileContentType;
+  size: number;
+  hits: number;
+  cachedAt: string;
+}
+
 /** Cache statistics for a single Edge Node (GET /cache/stats) */
 export interface EdgeNodeStats {
   nodeId: string;
   region: string;
   totalCached: number;
-  entries: string[];
+  entries: CacheEntryInfo[];
   activeConnections: number;
 }
 
@@ -83,4 +96,21 @@ export interface TrafficManagerHealth {
 /** Generic API error response */
 export interface ApiError {
   error: string;
+}
+
+/** Metadata for a file on the Origin (GET /files list) */
+export interface FileMetadata {
+  filename: string;
+  contentType: string;
+  mediaType: FileContentType;
+  size: number;
+  lastModified: string;
+}
+
+/** Response from a successful multipart file upload */
+export interface UploadResponse {
+  filename: string;
+  contentType: string;
+  size: number;
+  uploadedAt: string;
 }

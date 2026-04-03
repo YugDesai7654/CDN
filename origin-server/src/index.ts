@@ -3,13 +3,25 @@
 // authoritative copy of every file.  Edge Nodes cache content from here so
 // that end-users get fast responses from a nearby point-of-presence (PoP)
 // instead of hitting this central store every time.
+//
+// Phase 2 additions:
+//   • Multipart file upload via multer  (POST /files/upload)
+//   • Binary streaming via fs.createReadStream()  (GET /files/:filename)
+//   • File listing with metadata  (GET /files)
 // ─────────────────────────────────────────────────────────────────────────────
 
 import express, { Request, Response, NextFunction } from 'express';
 import fs from 'fs';
 import path from 'path';
 import fetch from 'node-fetch';
-import { FileRecord, HealthResponse } from './types';
+import multer from 'multer';
+import {
+  FileRecord,
+  HealthResponse,
+  FileContentType,
+  FileMetadata,
+  UploadResponse,
+} from './types';
 
 // ─── ENV VAR Validation ─────────────────────────────────────────────────────
 // In a real CDN the Origin would also validate credentials, TLS certs, etc.
@@ -67,6 +79,89 @@ for (const [filename, content] of Object.entries(sampleFiles)) {
   }
 }
 
+// ─── MIME / Media-Type Helpers ──────────────────────────────────────────────
+// These two functions are used both on the Origin (serve) and will be
+// duplicated on the Edge Node so that both components agree on content types.
+
+/** Map a file extension to a MIME Content-Type string. */
+function getContentType(filename: string): string {
+  const ext = path.extname(filename).toLowerCase();
+  const map: Record<string, string> = {
+    '.txt':  'text/plain',
+    '.jpg':  'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png':  'image/png',
+    '.gif':  'image/gif',
+    '.webp': 'image/webp',
+    '.mp3':  'audio/mpeg',
+    '.wav':  'audio/wav',
+    '.ogg':  'audio/ogg',
+    '.m4a':  'audio/mp4',
+    '.mp4':  'video/mp4',
+    '.webm': 'video/webm',
+  };
+  return map[ext] || 'application/octet-stream';
+}
+
+/** Map a MIME Content-Type to a broad media category for the frontend. */
+function getMediaType(contentType: string): FileContentType {
+  if (contentType.startsWith('text/'))  return 'text';
+  if (contentType.startsWith('image/')) return 'image';
+  if (contentType.startsWith('audio/')) return 'audio';
+  if (contentType.startsWith('video/')) return 'video';
+  return 'text'; // default fallback
+}
+
+// ─── Allowed MIME Types & Size Limits ───────────────────────────────────────
+// Strict allowlists prevent users from uploading executables, scripts, etc.
+const ALLOWED_MIME_TYPES: string[] = [
+  // Text
+  'text/plain',
+  // Images
+  'image/jpeg', 'image/png', 'image/gif', 'image/webp',
+  // Audio
+  'audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/mp4',
+  // Video
+  'video/mp4', 'video/webm', 'video/ogg',
+];
+
+/** Per-category maximum file size in bytes. */
+const SIZE_LIMITS: Record<FileContentType, number> = {
+  text:  2  * 1024 * 1024,   //   2 MB
+  image: 5  * 1024 * 1024,   //   5 MB
+  audio: 20 * 1024 * 1024,   //  20 MB
+  video: 100 * 1024 * 1024,  // 100 MB
+};
+
+// ─── Multer Configuration ───────────────────────────────────────────────────
+// Multer handles multipart/form-data parsing and writes the uploaded file
+// directly to DATA_DIR.  We use diskStorage so large videos don't blow up
+// the Node.js heap.
+const storage = multer.diskStorage({
+  destination: (_req, _file, cb) => {
+    cb(null, DATA_DIR);
+  },
+  filename: (_req, file, cb) => {
+    // Sanitize: strip any path separators from the original filename
+    const sanitized = file.originalname.replace(/[/\\]/g, '_');
+    cb(null, sanitized);
+  },
+});
+
+const upload = multer({
+  storage,
+  limits: {
+    fileSize: 100 * 1024 * 1024, // absolute max (video); fine-grained check below
+  },
+  fileFilter: (_req, file, cb) => {
+    if (!ALLOWED_MIME_TYPES.includes(file.mimetype)) {
+      cb(new Error(`File type not allowed: ${file.mimetype}`));
+      return;
+    }
+    cb(null, true);
+  },
+});
+
 // ─── Express App ────────────────────────────────────────────────────────────
 const app = express();
 app.use(express.json());
@@ -81,22 +176,32 @@ app.use((req: Request, _res: Response, next: NextFunction): void => {
 });
 
 // ─── GET /files ─────────────────────────────────────────────────────────────
-// Returns a list of all files present in the Origin Server's data directory.
+// Returns a list of all files present in the Origin Server's data directory,
+// now including contentType and mediaType for frontend file-browser rendering.
 app.get(
   '/files',
   (req: Request, res: Response, next: NextFunction): void => {
     try {
-      const files = fs.readdirSync(DATA_DIR);
-      const fileList = files.map((filename) => {
-        const filePath = path.join(DATA_DIR, filename);
-        const stats = fs.statSync(filePath);
-        return {
-          filename,
-          size: stats.size,
-          lastModified: stats.mtime.toISOString(),
-        };
-      });
-      res.json({ files: fileList });
+      const entries = fs.readdirSync(DATA_DIR);
+      const files: FileMetadata[] = entries
+        .filter((name) => {
+          // Only include actual files, skip directories
+          const filePath = path.join(DATA_DIR, name);
+          return fs.statSync(filePath).isFile();
+        })
+        .map((filename) => {
+          const filePath = path.join(DATA_DIR, filename);
+          const stats = fs.statSync(filePath);
+          const contentType = getContentType(filename);
+          return {
+            filename,
+            contentType,
+            mediaType: getMediaType(contentType),
+            size: stats.size,
+            lastModified: stats.mtime.toISOString(),
+          };
+        });
+      res.json({ files });
     } catch (err) {
       next(err);
     }
@@ -104,7 +209,7 @@ app.get(
 );
 
 // ─── GET /files/:filename ───────────────────────────────────────────────────
-// Serves a file from the Origin's local data directory.
+// Serves a file from the Origin's local data directory as a BINARY STREAM.
 //
 // CDN CONCEPT — "Cold Path" vs "Warm Path":
 // In a real CDN the Origin is the "cold path" — the slow, authoritative
@@ -114,6 +219,10 @@ app.get(
 // serve the same content in ~100 ms because they keep an in-memory cache.
 // The entire point of a CDN is to keep most traffic on the warm path so
 // that end-users experience low latency regardless of where the Origin is.
+//
+// Phase 2 change: we now stream raw bytes with correct Content-Type instead
+// of wrapping everything in JSON.  This is essential for images, audio, and
+// video — you cannot JSON-encode a binary file.
 app.get(
   '/files/:filename',
   async (req: Request, res: Response, next: NextFunction): Promise<void> => {
@@ -126,34 +235,96 @@ app.get(
         return;
       }
 
-      // ── 2 000 ms artificial delay ──────────────────────────────────────
-      // This simulates the "cold path" — the high-latency trip from an
-      // Edge Node all the way back to the Origin data-centre over the
-      // internet backbone.  Without Edge caching every single user
-      // request would pay this penalty.
+      const stats = fs.statSync(filePath);
+      const contentType = getContentType(filename);
+
+      // Cold path penalty — simulates backbone latency to origin
       await new Promise<void>((resolve) => setTimeout(resolve, 2000));
 
-      const content: string = fs.readFileSync(filePath, 'utf-8');
-      const stats = fs.statSync(filePath);
+      // Set response headers so Edge Nodes and clients know the type + size
+      res.setHeader('Content-Type', contentType);
+      res.setHeader('Content-Length', stats.size);
+      res.setHeader('X-Filename', filename);
+      res.setHeader('X-Last-Modified', stats.mtime.toISOString());
 
-      const record: FileRecord = {
-        filename,
-        content,
-        contentType: 'text/plain',
-        size: stats.size,
-        lastModified: stats.mtime.toISOString(),
-        servedAt: new Date().toISOString(),
-      };
-
-      res.json(record);
+      // Stream the file — efficient for large video files
+      const fileStream = fs.createReadStream(filePath);
+      fileStream.pipe(res);
     } catch (err) {
       next(err);
     }
   },
 );
 
-// ─── POST /files/:filename ──────────────────────────────────────────────────
-// Creates or updates a file on the Origin, then triggers a cache purge on
+// ─── POST /files/upload (multipart — binary file upload) ────────────────────
+// Accepts multipart/form-data with a single field "file".
+// Multer writes the file directly to DATA_DIR using disk storage.
+// After saving, we validate the per-category size limit and fire a purge.
+app.post(
+  '/files/upload',
+  (req: Request, res: Response, next: NextFunction): void => {
+    upload.single('file')(req, res, (err: unknown) => {
+      if (err) {
+        // Multer or fileFilter error
+        const message = err instanceof Error ? err.message : 'Upload failed';
+        res.status(400).json({ error: message });
+        return;
+      }
+
+      if (!req.file) {
+        res.status(400).json({ error: 'No file provided. Use field name "file".' });
+        return;
+      }
+
+      const file = req.file;
+      const contentType = getContentType(file.filename);
+      const mediaType = getMediaType(contentType);
+      const maxSize = SIZE_LIMITS[mediaType];
+
+      // ── Fine-grained size validation ─────────────────────────────────
+      // Multer already enforces the absolute max (100 MB) but we also
+      // need per-category limits (e.g. images ≤ 5 MB).
+      if (file.size > maxSize) {
+        // Remove the already-saved file
+        try {
+          fs.unlinkSync(file.path);
+        } catch {
+          // ignore cleanup errors
+        }
+        const maxMB = (maxSize / (1024 * 1024)).toFixed(0);
+        res.status(413).json({
+          error: `File too large. Max size for ${mediaType} is ${maxMB}MB, got ${(file.size / (1024 * 1024)).toFixed(2)}MB.`,
+        });
+        return;
+      }
+
+      console.log(`[UPLOAD] ${file.filename} (${contentType}, ${file.size} bytes)`);
+
+      // ── Fire-and-forget purge ────────────────────────────────────────
+      try {
+        fetch(`${PURGE_SERVICE_URL}/purge/${file.filename}`, { method: 'POST' })
+          .then(() => console.log(`[PURGE] Triggered purge for: ${file.filename}`))
+          .catch((purgeErr: unknown) =>
+            console.error(`[PURGE] Failed to purge ${file.filename}:`, purgeErr),
+          );
+      } catch (purgeErr: unknown) {
+        console.error(`[PURGE] Failed to trigger purge for ${file.filename}:`, purgeErr);
+      }
+
+      const response: UploadResponse = {
+        filename: file.filename,
+        contentType,
+        size: file.size,
+        uploadedAt: new Date().toISOString(),
+      };
+
+      res.status(201).json(response);
+    });
+  },
+);
+
+// ─── POST /files/:filename (text — backward compatible) ─────────────────────
+// Creates or updates a TEXT file on the Origin, then triggers a cache purge on
 // all Edge Nodes via the Purge Service.
 //
 // CDN CONCEPT — Write-Through Invalidation:
@@ -238,15 +409,13 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction): void =>
 // ─── Start Server ───────────────────────────────────────────────────────────
 app.listen(PORT, (): void => {
   console.log('═══════════════════════════════════════════════════');
-  console.log('  Origin Server');
+  console.log('  Origin Server (Phase 2 — Multimodal)');
   console.log('═══════════════════════════════════════════════════');
   console.log(`  PORT              : ${PORT}`);
   console.log(`  PURGE_SERVICE_URL : ${PURGE_SERVICE_URL}`);
   console.log(`  DATA_DIR          : ${DATA_DIR}`);
+  console.log(`  Accepted types    : ${ALLOWED_MIME_TYPES.join(', ')}`);
   console.log('═══════════════════════════════════════════════════');
   console.log(`  ✓ Ready — listening on port ${PORT}`);
   console.log('═══════════════════════════════════════════════════');
-
-  // TODO Phase 2: stream binary files using res.pipe() instead of res.json()
-  // TODO Phase 2: integrate with AWS S3 SDK for large file storage
 });
