@@ -5,6 +5,9 @@ import type { EdgeNodeStats } from "@/lib/types";
 /**
  * GET /api/cdn/stats
  * Fetches cache stats from all 3 edge nodes in parallel.
+ *
+ * Phase 2: Edge Node stats now include CacheEntryInfo[] with contentType,
+ * mediaType, size, hits, cachedAt — instead of plain filename strings.
  */
 export async function GET(): Promise<NextResponse> {
   try {

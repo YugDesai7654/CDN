@@ -1,11 +1,14 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
-import type { CDNFileResponse } from "@/lib/types";
 
 /**
  * GET /api/cdn/file?filename=hello.txt&edgeUrl=http://edge-node-a:3001
  * Proxies to the specified Edge Node's GET /files/:filename.
- * Captures X-Cache and X-Cache-Age headers and measures latency.
+ *
+ * Phase 2: The Edge Node now returns raw binary with correct Content-Type
+ * headers instead of JSON.  We read the response as an ArrayBuffer, forward
+ * the binary body, and pass through all CDN-specific headers so the browser
+ * can render images, play audio/video, or display text directly.
  */
 export async function GET(request: NextRequest): Promise<NextResponse> {
   try {
@@ -28,43 +31,43 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     }
 
     const start = Date.now();
-    const res = await fetch(`${edgeUrl}/files/${encodeURIComponent(filename)}`, {
-      cache: "no-store",
-    });
+    const res = await fetch(
+      `${edgeUrl}/files/${encodeURIComponent(filename)}`,
+      { cache: "no-store" }
+    );
     const latencyMs = Date.now() - start;
 
     if (!res.ok) {
+      const errorText = await res.text();
       return NextResponse.json(
-        { error: `Edge returned ${res.status} for ${filename}` },
+        { error: `Edge returned ${res.status} for ${filename}`, details: errorText },
         { status: res.status }
       );
     }
 
-    const body = (await res.json()) as {
-      filename: string;
-      content: string;
-      contentType: string;
-      source?: string;
-      cacheHit?: boolean;
-    };
+    // Read the full response as an ArrayBuffer (binary-safe)
+    const buffer = await res.arrayBuffer();
 
-    const xCache = res.headers.get("x-cache") as "HIT" | "MISS" || "MISS";
-    const sourceNodeId = body.source?.replace("edge-", "") || "?";
+    // Extract CDN headers from the Edge Node response
+    const contentType = res.headers.get("content-type") || "application/octet-stream";
+    const xCache = res.headers.get("x-cache") || "MISS";
+    const xServedBy = res.headers.get("x-served-by") || "unknown";
+    const xRegion = res.headers.get("x-region") || "unknown";
+    const xCacheAge = res.headers.get("x-cache-age") || "0";
 
-    const response: CDNFileResponse = {
-      filename: body.filename,
-      content: body.content,
-      contentType: body.contentType,
-      size: body.content.length,
-      lastModified: "",
-      servedAt: new Date().toISOString(),
-      xCache,
-      latencyMs,
-      servedBy: sourceNodeId,
-      region: "",
-    };
-
-    return NextResponse.json(response);
+    // Build the response with binary body and forwarded headers
+    return new NextResponse(buffer, {
+      status: 200,
+      headers: {
+        "Content-Type": contentType,
+        "Content-Length": String(buffer.byteLength),
+        "X-Cache": xCache,
+        "X-Served-By": xServedBy,
+        "X-Region": xRegion,
+        "X-Cache-Age": xCacheAge,
+        "X-Latency-Ms": String(latencyMs),
+      },
+    });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Unknown error";
     return NextResponse.json({ error: message }, { status: 502 });
